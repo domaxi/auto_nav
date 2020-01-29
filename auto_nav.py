@@ -49,7 +49,6 @@ def get_occupancy(msg):
     # log the info
     rospy.loginfo('Unmapped: %i Unoccupied: %i Occupied: %i Total: %i', occ_counts[0][0], occ_counts[0][1], occ_counts[0][2], total_bins)
 
-
 def rotatebot(rot_angle):
     global yaw
 
@@ -124,7 +123,7 @@ def pick_direction():
     pub.publish(twist)
 
     try:
-        lr2i = np.argmax(laser_range)
+        lr2i = np.argmax(130)
     except ValueError:
         # in case laser_range is empty
         lr2i = 0
