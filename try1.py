@@ -2,6 +2,7 @@
 import rospy
 import numpy as np
 from sensor_msgs.msg import LaserScan
+import GPIO
 
 def callback(msg):
     # create numpy array
