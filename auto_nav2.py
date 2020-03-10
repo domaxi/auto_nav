@@ -17,8 +17,8 @@ from sound_play.libsoundplay import SoundClient
 laser_range = np.array([])
 occdata = np.array([])
 yaw = 0.0
-rotate_speed = 0.1
-linear_speed = 0.1
+rotate_speed = 1.5
+linear_speed = 0.15
 stop_distance = 0.25
 occ_bins = [-1, 0, 100, 101]
 front_angle = 30
@@ -42,6 +42,7 @@ def get_laserscan(msg):
     # could have replaced all values below msg.range_min, but the small values
     # that are not zero appear to be useful
     laser_range[laser_range==0] = np.nan
+    laser_range[laser_range==]
 
 
 def get_occupancy(msg):
