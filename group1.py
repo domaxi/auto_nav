@@ -11,18 +11,28 @@ import cmath
 import numpy as np
 import time
 import cv2
+import tf2_ros
+from math import pi
+from math import atan
 #from sound_play.msg import SoundRequest
 #from sound_play.libsoundplay import SoundClient
+from PIL import Image
+#import random
 
 laser_range = np.array([])
 occdata = np.array([])
+im2arr=[]
 yaw = 0.0
 rotate_speed = 0.22
-linear_speed = 0.15
+linear_speed = 0.22
 stop_distance = 0.5
+accuracy = 0.3
+resolution = 0
 occ_bins = [-1, 0, 100, 101]
-front_angle = 30
+front_angle = 20
 front_angles = range(-front_angle,front_angle+1,1)
+width=0
+height=0
 
 
 def get_odom_dir(msg):
@@ -54,13 +64,89 @@ def get_occupancy(msg):
     # calculate total number of bins
     total_bins = msg.info.width * msg.info.height
     # log the info
-    # rospy.loginfo('Unmapped: %i Unoccupied: %i Occupied: %i Total: %i', occ_counts[0][0], occ_counts[0][1], occ_counts[0][2], total_bins)
+    rospy.loginfo('Unmapped: %i Unoccupied: %i Occupied: %i Total: %i', occ_counts[0][0], occ_counts[0][1], occ_counts[0][2], total_bins)
 
     # make msgdata go from 0 instead of -1, reshape into 2D
     oc2 = msgdata + 1
     # reshape to 2D array using column order
     occdata = np.uint8(oc2.reshape(msg.info.height,msg.info.width,order='F'))
 
+def callback(msg, tfBuffer):
+    global occdata
+    global im2arr
+    global width
+    global height
+    global resolution
+    # create numpy array
+    occdata = np.array([msg.data])
+    # compute histogram to identify percent of bins with -1
+    occ_counts = np.histogram(occdata,occ_bins)
+    # calculate total number of bins
+    total_bins = msg.info.width * msg.info.height
+    width=msg.info.width
+    height=msg.info.height
+    # log the info
+    rospy.loginfo('Width: %i Height: %i',msg.info.width,msg.info.height)
+    rospy.loginfo('Unmapped: %i Unoccupied: %i Occupied: %i Total: %i', occ_counts[0][0], occ_counts[0][1], occ_counts[0][2], total_bins)
+
+    # find transform to convert map coordinates to base_link coordinates
+    # lookup_transform(target_frame, source_frame, time)
+    trans = tfBuffer.lookup_transform('map', 'base_link', rospy.Time(0))
+    cur_pos = trans.transform.translation
+    cur_rot = trans.transform.rotation
+    rospy.loginfo(['Trans: ' + str(cur_pos)])
+    rospy.loginfo(['Rot: ' + str(cur_rot)])
+
+    # get map resolution
+    map_res = msg.info.resolution
+    resolution = msg.info.resolution
+    # get map origin struct has fields of x, y, and z
+    map_origin = msg.info.origin.position
+    # get map grid positions for x, y position
+    grid_x = int(round((cur_pos.x - map_origin.x) / map_res))
+    grid_y = int(round((cur_pos.y - map_origin.y) / map_res))
+    rospy.loginfo(['Grid Y: ' + str(grid_y) + ' Grid X: ' + str(grid_x)])
+
+    # make occdata go from 0 instead of -1, reshape into 2D
+    oc2 = occdata + 1
+    # set all values above 1 (i.e. above 0 in the original map data, representing occupied locations)
+    oc3 = (oc2>1).choose(oc2,2)
+    # reshape to 2D array using column order
+    odata = np.uint8(oc3.reshape(msg.info.height,msg.info.width,order='F'))
+    # set current robot location to 0
+    rospy.loginfo(['len odata is',len(odata)])
+    if len(odata)>1:
+        odata[grid_x][grid_y] = 0
+    # create image from 2D array using PIL
+    img = Image.fromarray(odata.astype(np.uint8))
+    # find center of image
+    i_centerx = msg.info.width/2
+    i_centery = msg.info.height/2
+    # translate by curr_pos - centerxy to make sure the rotation is performed
+    # with the robot at the center
+    # using tips from:
+    # https://stackabuse.com/affine-image-transformations-in-python-with-numpy-pillow-and-opencv/
+    translation_m = np.array([[1, 0, (i_centerx-grid_y)],
+                               [0, 1, (i_centery-grid_x)],
+                               [0, 0, 1]])
+    # Image.transform function requires the matrix to be inverted
+    tm_inv = np.linalg.inv(translation_m)
+    # translate the image so that the robot is at the center of the image
+    img_transformed = img.transform((msg.info.height, msg.info.width),
+                                    Image.AFFINE,
+                                    data=tm_inv.flatten()[:6],
+                                    resample=Image.NEAREST)
+
+    # convert quaternion to Euler angles
+    orientation_list = [cur_rot.x, cur_rot.y, cur_rot.z, cur_rot.w]
+    (roll, pitch, yaw) = euler_from_quaternion(orientation_list)
+    rospy.loginfo(['Yaw: R: ' + str(yaw) + ' D: ' + str(np.degrees(yaw))])
+
+    # rotate by 180 degrees to invert map so that the forward direction is at the top of the image
+    rotated = img_transformed.rotate(np.degrees(-yaw)+180)
+    # we should now be able to access the map around the robot by converting
+    # back to a numpy array: im2arr = np.array(rotated)
+    im2arr = np.array(rotated)
 
 def rotatebot(rot_angle):
     global yaw
@@ -111,49 +197,22 @@ def rotatebot(rot_angle):
         # get the sign to see if we can stop
         c_dir_diff = np.sign(c_change.imag)
         # rospy.loginfo(['c_change_dir: ' + str(c_change_dir) + ' c_dir_diff: ' + str(c_dir_diff)])
+        rospy.loginfo(['test'])
+        #angle_to_go = abs(target_yaw - current_yaw)
+        #twist.linear.x = 0.0
+        #twist.angular.z = c_change_dir * rotate_speed * (angle_to_go/pi)
+        #pub.publish(twist)
         rate.sleep()
+        if math.degrees(target_yaw)-5<=math.degrees(current_yaw)<=math.degrees(target_yaw)+5:
+            break
 
     rospy.loginfo(['End Yaw: ' + str(math.degrees(current_yaw))])
+    rospy.loginfo(['exits loop'])
     # set the rotation speed to 0
     twist.angular.z = 0.0
     # stop the rotation
-    time.sleep(1)
+    time.sleep(0.1)
     pub.publish(twist)
-
-
-def pick_direction():
-    global laser_range
-
-    # publish to cmd_vel to move TurtleBot
-    pub = rospy.Publisher('cmd_vel', Twist, queue_size=10)
-
-    # stop moving
-    twist = Twist()
-    twist.linear.x = 0.0
-    twist.angular.z = 0.0
-    time.sleep(1)
-    pub.publish(twist)
-
-    if laser_range.size != 0:
-        # use nanargmax as there are nan's in laser_range added to replace 0's
-        lr2i = np.nanargmax(laser_range)
-    else:
-        lr2i = 0
-
-    rospy.loginfo(['Picked direction: ' + str(lr2i) + ' ' + str(laser_range[lr2i]) + ' m'])
-
-    # rotate to that direction
-    rotatebot(float(lr2i))
-
-    # start moving
-    rospy.loginfo(['Start moving'])
-    twist.linear.x = linear_speed
-    twist.angular.z = 0.0
-    # not sure if this is really necessary, but things seem to work more
-    # reliably with this
-    time.sleep(1)
-    pub.publish(twist)
-
 
 def stopbot():
     # publish to cmd_vel to move TurtleBot
@@ -162,9 +221,141 @@ def stopbot():
     twist = Twist()
     twist.linear.x = 0.0
     twist.angular.z = 0.0
-    time.sleep(1)
+    time.sleep(0.1)
     pub.publish(twist)
 
+def forward_left():
+    rospy.loginfo(['forward_left is running'])
+    j=0
+    lst=[]
+    out=[]
+    for i in range(height//2):
+        if im2arr[height//2-i][width//2]==1:
+                lst.append(im2arr[height//2-i][width//2::-1])
+        if im2arr[height//2-i][width//2]>1:
+                break
+    for x in range(len(lst)):
+        for y in range(len(lst[0])):
+                if lst[x][y]==0:
+                        lst[x]=lst[x][0:y+1]
+                        break
+                else:
+                        continue
+    for j in lst:
+        out.append(list(map(lambda x:2 if x>1 else x,j)))
+    for z in range(len(out)):
+        if 0 in out[z]:
+                if 2 not in out[z]:
+                        rospy.loginfo(['L', z*resolution, (len(out[z])-1)*resolution])
+                        return ["L",z*resolution,(len(out[z])-1)*resolution]
+                else:
+                        continue
+        else:
+                continue
+    return False
+
+def forward_right():
+    rospy.loginfo(['forward_right is running'])
+    j=0
+    lst=[]
+    out=[]
+    for i in range(height//2):
+        if im2arr[height//2-i][width//2]==1:
+                lst.append(im2arr[height//2-i][width//2::])
+        if im2arr[height//2-i][width//2]>1:
+                break
+    for x in range(len(lst)):
+        for y in range(len(lst[0])):
+                if lst[x][y]==0:
+                        lst[x]=lst[x][0:y+1]
+                        break
+                else:
+                        continue
+    for j in lst:
+        out.append(list(map(lambda x:2 if x>1 else x,j)))
+    for z in range(len(out)):
+        if 0 in out[z]:
+                if 2 not in out[z]:
+                        rospy.loginfo(['R', z*resolution, (len(out[z])-1)*resolution])
+                        return ["R",z*resolution,(len(out[z])-1)*resolution]
+                else:
+                        continue
+        else:
+                continue
+    return False
+
+def move():
+    rospy.loginfo(['move is running'])
+    pub = rospy.Publisher('cmd_vel', Twist, queue_size=10)
+    if forward_right()==False and forward_left()==False:
+        rospy.loginfo(['Target not found, try turning...'])
+        rotatebot(20)
+        move()
+
+
+    #if abs(laser_range[10]-laser_range[-10])<0.2:
+        #rotatebot(10)
+        #move()
+    if forward_left()!=False:
+        if forward_left()[1]<0.08:
+            rotatebot(12)
+	    move()
+    elif forward_right()!=False:
+        if forward_right()[1]<0.08:
+            rotatebot(12)
+	    move()
+def pick_direction():
+    global laser_range
+    # publish to cmd_vel to move TurtleBot
+    pub = rospy.Publisher('cmd_vel', Twist, queue_size=10)
+    lr2i = 0
+    # stop moving
+    twist = Twist()
+    twist.linear.x = 0.0
+    twist.angular.z = 0.0
+    time.sleep(0.05)
+    pub.publish(twist)
+
+    #paste your code here
+
+    if laser_range.size != 0:
+        move()
+	if laser_range[1] < stop_distance:
+	    if laser_range[90] < stop_distance:
+		lr2i = -90
+	    elif laser_range[-90] < stop_distance:
+		lr2i = 90
+	elif forward_right() != False:
+	    if forward_right()[1] <= 0.1:
+		lr2i = -70
+	    else:
+		if laser_range[15] > laser_range[-15]:
+		    lr2i = 15
+		else:
+		    lr2i = -15
+	elif forward_left() != False:
+	    if forward_left()[1] <= 0.1:
+		lr2i = 70
+	    else:
+		if laser_range[15] > laser_range[-15]:
+		    lr2i = 15
+		else:
+		    lr2i = -15
+    else:
+        lr2i = 0
+
+
+    # rotate to that direction
+    rotatebot(float(lr2i))
+
+    # start moving
+    rospy.loginfo(['Start moving !!!'])
+    twist.linear.x = linear_speed
+    twist.angular.z = 0.0
+    # not sure if this is really necessary, but things seem to work more
+    # reliably with this
+    time.sleep(1)
+    pub.publish(twist)
 
 def closure(mapdata):
     # This function checks if mapdata contains a closed contour. The function
@@ -195,18 +386,10 @@ def closure(mapdata):
     # img3 = cv2.erode(img2,element)
     img4 = cv2.dilate(img2,element)
     # use OpenCV's findContours function to identify contours
-    # OpenCV version 3 changed the number of return arguments, so we
-    # need to check the version of OpenCV installed so we know which argument
-    # to grab
     fc = cv2.findContours(img4, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    (major, minor, _) = cv2.__version__.split(".")
-    if(major == '3'):
-        contours = fc[1]
-    else:
-        contours = fc[0]
+    contours = fc[0]
     # find number of contours returned
     lc = len(contours)
-    # rospy.loginfo('# Contours: %s', str(lc))
     # create array to compute ratio of area to arc length
     cAL = np.zeros((lc,2))
     for i in range(lc):
@@ -217,7 +400,7 @@ def closure(mapdata):
     # so if there are no contours with high ratios, we can safely say
     # there are no closed contours
     cALratio = cAL[:,0]/cAL[:,1]
-    # rospy.loginfo('Closure: %s', str(cALratio))
+    # print(cALratio)
     if np.any(cALratio > ALTHRESH):
         return True
     else:
@@ -226,27 +409,33 @@ def closure(mapdata):
 
 def mover():
     global laser_range
-
     rospy.init_node('mover', anonymous=True)
+
+    tfBuffer = tf2_ros.Buffer()
+    tfListener = tf2_ros.TransformListener(tfBuffer)
+    rospy.sleep(1.0)
 
     # subscribe to odometry data
     rospy.Subscriber('odom', Odometry, get_odom_dir)
     # subscribe to LaserScan data
     rospy.Subscriber('scan', LaserScan, get_laserscan)
     # subscribe to map occupancy data
-    rospy.Subscriber('map', OccupancyGrid, get_occupancy)
+    rospy.Subscriber('map', OccupancyGrid, callback, tfBuffer)
 
     rospy.on_shutdown(stopbot)
 
     rate = rospy.Rate(5) # 5 Hz
 
-    # save start time
+    # save start time to file
     start_time = time.time()
     # initialize variable to write elapsed time to file
-    contourCheck = 1
+    timeWritten = 0
 
     # find direction with the largest distance from the Lidar,
     # rotate to that direction, and start moving
+    rotatebot(0)
+    rospy.loginfo(['len laser range',len(laser_range)])
+    rospy.loginfo(['finished turning 0'])
     pick_direction()
 
     while not rospy.is_shutdown():
@@ -261,28 +450,31 @@ def mover():
         # if the list is not empty
         if(len(lri[0])>0):
             rospy.loginfo(['Stop!'])
+            stopbot()
             # find direction with the largest distance from the Lidar
             # rotate to that direction
             # start moving
+            rospy.loginfo(['running our function'])
             pick_direction()
 
         # check if SLAM map is complete
-        if contourCheck :
+        if timeWritten :
             if closure(occdata) :
                 # map is complete, so save current time into file
                 with open("maptime.txt", "w") as f:
                     f.write("Elapsed Time: " + str(time.time() - start_time))
-                contourCheck = 0
+                timeWritten = 1
                 # play a sound
-                soundhandle = SoundClient()
-                rospy.sleep(1)
-                soundhandle.stopAll()
-                soundhandle.play(SoundRequest.NEEDS_UNPLUGGING)
+                # soundhandle = SoundClient()
+                # rospy.sleep(1)
+                # soundhandle.stopAll()
+                # soundhandle.play(SoundRequest.NEEDS_UNPLUGGING)
                 rospy.sleep(2)
                 # save the map
                 cv2.imwrite('mazemap.png',occdata)
 
         rate.sleep()
+
 
 
 if __name__ == '__main__':
